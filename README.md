@@ -122,12 +122,28 @@ ClaimResponse claimReward(memberId, clientId) {
 - 프론트가 **HTTP/2 지원**(`http2 on`) → `race_test_single_packet.py`
   (단일 패킷 공격: 모든 요청을 한 TCP 패킷에 담아 지터 ~0, 가장 강력).
 
-## 빠른 시작 (단일 서버 최소 재현)
+## 빠른 시작
+
+### 한 방에 전부 (실제 스택, 권장) — Docker 필요
+```bash
+cd realstack && ./run_all.sh          # 스택 자동 기동 + 준비 대기 + 전 기법/락모드 테스트 + 요약표
+# ./run_all.sh 40                      # 동시요청수 지정(기본 20)
+```
+nginx + Tomcat×2 + Postgres + Redis 를 띄우고 HTTP/1.1 라스트바이트 · HTTP/2 단일패킷 ×
+{none/local/distributed-naive/distributed} 을 모두 돌려 DB(`grant_log`) 기준으로 요약한다.
+자세한 출력·결과는 [`realstack/README.md`](realstack/README.md).
+
+### 단일 서버 최소 재현 (Docker 없이, stdlib만)
 ```bash
 python3 example_api/claim_server.py --port 8081 --race-window 0.05 &
 curl -s -X POST -H "X-Opportunities: 1" http://127.0.0.1:8081/admin/reset
 python3 race_test_claim.py --url http://127.0.0.1:8081/reward/claim -n 20            # 취약: 20/20
 python3 race_test_claim.py --url http://127.0.0.1:8081/reward/claim/fixed -n 20      # 수정본(락): 1/20
+```
+
+### 레이스 윈도우 벤치마크
+```bash
+python3 bench.py --reps 30 --windows 50,10,5,1,0     # → bench_results/results.{json,csv,md}
 ```
 
 ## 실측 web/was 구조 반영 랩 — `example_api/claim_topology.py`
