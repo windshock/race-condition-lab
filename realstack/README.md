@@ -20,9 +20,22 @@ client ──▶ nginx ──▶   ┤                                          
 | `redis` | redis:7 | 분산 락(Redisson RLock) 백엔드 |
 
 취약 코드: `app/.../ClaimTxService.claimTx()` (검사~소모 사이 락·FOR UPDATE 없음).
-락 모드: `app/.../ClaimService.claim()` — `none`(운영) / `local`(JVM ReentrantLock) /
-`distributed-naive`(비원자 EXISTS→SET 안티패턴) / `distributed`(Redisson RLock,
-원자적). 요청 헤더 `X-Lock-Mode` 로 선택.
+모드: `app/.../ClaimService.claim()` — 요청 헤더 `X-Lock-Mode` 로 선택.
+
+| 모드 | 방식 | 결과 |
+|---|---|---|
+| `none` | 락 없음(= 운영 코드) | 레이스 |
+| `local` | JVM ReentrantLock (인스턴스 내부만) | 인스턴스 수만큼 누수 |
+| `distributed-naive` | 비원자 EXISTS→SET 안티패턴 | 윈도우만 축소, 여전히 누수 |
+| `distributed` | Redisson RLock (원자적) | 차단 |
+| **`db-conditional`** | **조건부 UPDATE + affected rows (락 없음)** | **차단 ★1순위 권고** |
+| **`db-for-update`** | **`SELECT … FOR UPDATE` 비관적 잠금** | **차단 ★3순위** |
+| **`db-unique`** | **취약 로직 + UNIQUE 최종 안전망** | **같은 발급권 중복 차단(안전망)** |
+
+> DB 모드(`db-*`)는 Redis 없이 DB 원자성만으로 인스턴스 경계를 넘어 막는다.
+> 대응 방식 선택 기준·최소 변경 예제(JdbcTemplate/JPA/MyBatis)·정책 문구는
+> **[개발자 가이드](../docs/race-condition-mitigation-guide.md)**
+> (English: [guide.en.md](../docs/race-condition-mitigation-guide.en.md)) 참고.
 
 ## 한 방에 전부 실행
 ```bash
@@ -30,26 +43,30 @@ cd realstack
 ./run_all.sh            # 스택 자동 기동(up -d --build) + 준비 대기 + 모든 테스트 + 요약표
 ./run_all.sh 40         # 동시요청수 지정(기본 20)
 ```
-`run_all.sh` 출력 예:
+`run_all.sh`는 **두 시나리오**(발급권 1개 / 일일 카운터 1회)를 전 모드에 대해 A/B로 돌리고,
+완화 모드가 하나라도 누수하면 `exit 1`. 출력 예(동시 20, DB `grant_log`/`quota` 기준):
 ```
-── HTTP/1.1 라스트 바이트 동기화 (:8080) ──
-  H1 라스트바이트 none               지급 15/20 분포={'was2': 5, 'was1': 10}   ⚠  레이스 재현
-  H1 라스트바이트 local              지급  2/20 분포={'was1': 1, 'was2': 1}    ⚠  레이스 재현
-  H1 라스트바이트 distributed-naive  지급 15/20 분포={'was1': 7, 'was2': 8}    ⚠  레이스 재현
-  H1 라스트바이트 distributed        지급  1/20 분포={'was2': 1}               ✅ 차단/정상
-── HTTP/2 단일 패킷 공격 (:8443, ALPN h2) ──
-  H2 단일패킷 none               지급 20/20 분포={'was2': 10, 'was1': 10}  ⚠  레이스 재현
-  H2 단일패킷 local              지급  2/20 분포={'was1': 1, 'was2': 1}    ⚠  레이스 재현
-  H2 단일패킷 distributed-naive  지급 16/20 분포={'was1': 8, 'was2': 8}    ⚠  레이스 재현
-  H2 단일패킷 distributed        지급  1/20 분포={'was1': 1}               ✅ 차단/정상
+[A] 발급권(기회) 1개 한도  — 불변식 granted==1
+  H2 단일패킷 none               지급 20/20  quota=30   ⚠  레이스 재현(대조군)
+  H2 단일패킷 local              지급  2/20  quota=48   ⚠  레이스 재현(대조군)
+  H2 단일패킷 distributed-naive  지급  9/20  quota=41   ⚠  레이스 재현(대조군)
+  H2 단일패킷 distributed        지급  1/20  quota=49   ✅ 차단/정상
+  H2 단일패킷 db-conditional     지급  1/20  quota=49   ✅ 차단/정상
+  H2 단일패킷 db-for-update      지급  1/20  quota=49   ✅ 차단/정상
+  H2 단일패킷 db-unique          지급  1/20  quota=49   ✅ 차단/정상
+[B] 일일 카운터 1회 한도  — 불변식 granted==1 AND quota>=0
+  H2 단일패킷 none               지급 20/20  quota=-19  ⚠  레이스 재현(대조군)
+  H2 단일패킷 db-conditional     지급  1/20  quota=0    ✅ 차단/정상
+  H2 단일패킷 db-for-update      지급  1/20  quota=0    ✅ 차단/정상
+RESULT: PASS — 모든 완화 모드가 두 시나리오에서 불변식을 지켰습니다.
 ```
-> 집계는 DB(`grant_log`) 기준(서버 실측). H1 라스트바이트는 회차별 편차가 있고,
+> 집계는 DB(`grant_log`/`quota`) 기준(서버 실측). H1 라스트바이트는 회차별 편차가 있고,
 > H2 단일패킷이 더 일관적으로 레이스를 맞춘다.
 >
-> **`distributed-naive`** = 비원자 `EXISTS→SET(NX 아님)→DEL` 락(실무에서 관측된
-> 안티패턴). 원자적 `distributed`(1/20)와 달리 **15~16/20 누수** — 라스트바이트/
-> 단일패킷 동기화 앞에서는 "윈도우 축소"조차 거의 무의미하다(모든 요청이 `SET` 반영 전에
-> `EXISTS`를 통과). 락을 넣어도 원자적 획득이 아니면 못 막는다는 실증.
+> **`db-conditional`/`db-for-update`/`db-unique`** = Redis 없이 **DB 원자성**만으로 차단.
+> [B] 카운터 시나리오에서 `none`은 `quota=-19`까지 언더플로하지만, `db-conditional`은
+> 조건부 UPDATE(`… WHERE count>=1`)로 정확히 1건만 통과하고 quota는 0에서 멈춘다.
+> `db-unique`는 [B]에서 제외 — UNIQUE는 "같은 발급권 중복"만 막고 자유 카운터는 못 막는다.
 
 ## 수동 실행 (개별)
 ```bash
@@ -75,28 +92,31 @@ curl -s -X POST -H "X-Opportunities: 1" $A/admin/reset >/dev/null
 python3 ../race_test_single_packet.py --url "$U" -n 20 --insecure
 ```
 
-## 실측 결과 (발급권 1개, 동시 20)
-| 기법 / lock-mode | none (운영) | local (JVM락) | distributed-naive (비원자) | distributed (원자적) |
-|---|---|---|---|---|
-| **HTTP/1.1 라스트바이트**(:8080) | **15~20/20** was1·was2 | **2/20** 인스턴스마다 1건 | **15/20** 여전히 누수 | **1/20** ✅ |
-| **HTTP/2 단일패킷**(:8443) | **20/20** was1:10/was2:10 | **2/20** | **16/20** 여전히 누수 | **1/20** ✅ |
+## 실측 결과 (발급권 1개, 동시 20, HTTP/2 단일패킷)
+| lock-mode | 지급 | 판정 |
+|---|---|---|
+| `none` (운영) | **20/20** was1·was2 양쪽 | ⚠ 레이스 |
+| `local` (JVM락) | **2/20** 인스턴스마다 1건 | ⚠ 인스턴스 수만큼 누수 |
+| `distributed-naive` (비원자) | **9~16/20** | ⚠ 여전히 누수 |
+| `distributed` (Redisson) | **1/20** | ✅ 차단 |
+| `db-conditional` (조건부 UPDATE) | **1/20** | ✅ 차단 |
+| `db-for-update` (`FOR UPDATE`) | **1/20** | ✅ 차단 |
+| `db-unique` (UNIQUE 안전망) | **1/20** | ✅ 중복 차단 |
 
 - `none`: 발급권 1개로 20건 지급. 같은 `voucherSeq` 가 **was1·was2 양쪽**에서 소모(공유 DB).
 - `local`: JVM-local 락은 인스턴스 내부만 직렬화 → **인스턴스 수(2)만큼 초과 지급**.
-  같은 `voucherSeq` 가 was1·was2 양쪽 grant_log 에 남는다(교차-인스턴스 증거).
-- `distributed-naive`: 비원자 `EXISTS→SET(NX 아님)→DEL` 안티패턴. 동시 요청이
-  둘 다 `EXISTS`에서 "락 없음"을 보고 둘 다 `SET` → 상호배제 실패 → **15~16/20 누수**.
-  원자적 획득이 아니면 락을 넣어도 못 막는다(윈도우만 축소, 동기화 공격엔 그마저 무의미).
+- `distributed-naive`: 비원자 `EXISTS→SET(NX 아님)→DEL` 안티패턴 → 상호배제 실패 → 누수.
 - `distributed`: Redisson `RLock`(원자적 `SET NX` + Lua)이 인스턴스 경계를 넘어 직렬화 → **차단**.
+- `db-*`: **Redis 없이 DB 원자성**(조건부 UPDATE / 행 잠금 / UNIQUE)만으로 인스턴스 경계를 넘어 차단.
 
-## 권장 수정
-- `claimReward` 의 검사~소모 구간을 발급권 적립 경로처럼 **분산 락**(key=memberId)으로 감싼다.
-  다중 인스턴스에선 JVM-local `synchronized` 로는 불충분(위 `local` 결과가 근거).
-- 분산 락은 반드시 **원자적 획득**이어야 한다: `SET key <token> NX PX <ttl>` 의 반환값으로
-  획득 판정(+ 해제는 소유자 토큰 비교 Lua), 또는 Redisson `RLock`. `EXISTS→SET`(NX 없이)
-  두 왕복으로 나누면 그 자체가 TOCTOU → `distributed-naive` 결과처럼 못 막는다.
-- 또는 DB 레벨 조건부 UPDATE(`... WHERE seq=? AND used=false` + 영향행수 1 확인)로
-  소유권을 확정한 뒤 보상 지급(CAS). 락 없이도 원자적 소모 보장.
+## 권장 수정 (요약 — 상세는 [개발자 가이드](../docs/race-condition-mitigation-guide.md))
+1. **DB 조건부 UPDATE를 우선** — `UPDATE … WHERE seq=? AND used=false`(또는 카운터
+   `WHERE count<max`) + **영향행수 1 확인**으로 락 없이 원자적 소유권 확정(`db-conditional`).
+2. **UNIQUE를 최종 안전망**으로 — 같은 키 중복 저장을 DB가 거부(`db-unique`). 단 자유 카운터는 못 막음.
+3. 구조를 크게 못 바꾸면 **`SELECT … FOR UPDATE`**(락 대기 상한 필수, `db-for-update`).
+4. DB만으로 원자화가 어려운 임계구역만 **분산 락** — 반드시 원자적 획득(`SET NX`)+소유자 해제.
+   Redis 락은 상호배제일 뿐 트랜잭션 원자성이 아님(기본값 아님).
+- 외부 API 지급/결제/취소는 DB에서 원자적 **예약** 후 트랜잭션 밖에서 **멱등키**로 호출(가이드 4번).
 
 ## 정리
 ```bash

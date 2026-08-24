@@ -129,9 +129,14 @@ ClaimResponse claimReward(memberId, clientId) {
 cd realstack && ./run_all.sh          # 스택 자동 기동 + 준비 대기 + 전 기법/락모드 테스트 + 요약표
 # ./run_all.sh 40                      # 동시요청수 지정(기본 20)
 ```
-nginx + Tomcat×2 + Postgres + Redis 를 띄우고 HTTP/1.1 라스트바이트 · HTTP/2 단일패킷 ×
-{none/local/distributed-naive/distributed} 을 모두 돌려 DB(`grant_log`) 기준으로 요약한다.
-자세한 출력·결과는 [`realstack/README.md`](realstack/README.md).
+nginx + Tomcat×2 + Postgres + Redis 를 띄우고, **두 시나리오**(발급권 1개 / 일일 카운터 1회) ×
+HTTP/1.1 라스트바이트 · HTTP/2 단일패킷 × {none/local/distributed-naive/distributed 및 DB 네이티브
+db-conditional/db-for-update/db-unique} 를 돌려 DB(`grant_log`/`quota`) 기준으로 요약한다
+(완화 모드 누수 시 `exit 1`). 자세한 출력·결과는 [`realstack/README.md`](realstack/README.md).
+
+> **개발팀 조치 가이드** — 대응 방식 선택 기준·최소 변경 예제(JdbcTemplate/JPA/MyBatis)·
+> 외부 API 구조·정책 문구는 **[docs/race-condition-mitigation-guide.md](docs/race-condition-mitigation-guide.md)**
+> (English: [guide.en.md](docs/race-condition-mitigation-guide.en.md)).
 
 ### 단일 서버 최소 재현 (Docker 없이, stdlib만)
 ```bash
@@ -253,12 +258,15 @@ python3 bench.py --reps 30 --concurrent 20 --windows 50,10,5,1,0
   single-packet 1ms (PortSwigger). 여기 랩은 *기법 서열*을 보이는 용도다.
 
 ## 권장 수정
-`claimReward()`의 검사~소모 구간을 발급권 적립 경로와 동일하게 **원자적 분산 락**
-(key=memberId, 예: Redisson RLock 또는 `SET NX PX` + Lua 해제)으로 감싸거나,
-`markVoucherUsed` 를 조건부 UPDATE(`WHERE used=false`)로 만들어 영향 행 수(1)로 소유권을
-확정한 뒤 보상을 지급한다(CAS). 다중 인스턴스 배포에서는 JVM-local 락으로 불충분하고
-(위 `multi/local` 결과), 비원자 `EXISTS→SET` 락도 불충분하다(`realstack` 의
-`distributed-naive` 결과).
+**1순위는 DB 조건부 UPDATE다.** `markVoucherUsed` 를 조건부 UPDATE(`WHERE used=false`, 카운터는
+`WHERE count<max`)로 만들어 **영향 행 수(1)로 소유권을 확정**한 뒤 보상을 지급한다(CAS, 락 불필요).
+중복 키형 한도는 **UNIQUE 최종 안전망**을 함께 두고, 구조를 크게 못 바꾸면 `SELECT … FOR UPDATE`
+(락 대기 상한 필수)를 쓴다. 분산 락은 DB만으로 원자화가 어려운 임계구역에만 — 반드시 원자적 획득
+(`SET NX PX` + 소유자 토큰 Lua 해제) 또는 Redisson `RLock`. 다중 인스턴스 배포에서는 JVM-local
+락으로 불충분하고(위 `multi/local` 결과), 비원자 `EXISTS→SET` 락도 불충분하다(`realstack` 의
+`distributed-naive` 결과). 외부 API 지급/결제/취소는 DB에서 원자적 **예약** 후 트랜잭션 밖에서
+**멱등키**로 호출한다. 선택 기준·최소 변경 예제·정책 문구:
+[docs/race-condition-mitigation-guide.md](docs/race-condition-mitigation-guide.md).
 
 ## 분류 (Classification)
 - **CWE-362** — Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')
