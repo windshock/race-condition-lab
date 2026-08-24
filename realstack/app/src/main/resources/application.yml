@@ -1,0 +1,28 @@
+server:
+  port: 8080
+  # Tomcat 커넥터(내장) — 실측 설정 반영
+  tomcat:
+    threads:
+      max: 1024
+    accept-count: 200
+    max-keep-alive-requests: 2000
+
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/claim}
+    username: ${DB_USER:claim}
+    password: ${DB_PASSWORD:claim}
+  sql:
+    init:
+      mode: never             # 스키마는 Postgres init(docker-entrypoint-initdb.d)에서 1회 생성
+
+app:
+  instance-name: ${INSTANCE_NAME:was0}       # was1 / was2
+  race-window-ms: ${RACE_WINDOW_MS:50}        # 검사~소모 사이 지연(레이스 윈도우)
+  default-lock-mode: ${DEFAULT_LOCK_MODE:none}  # none | local | distributed
+  redis-address: redis://${REDIS_HOST:localhost}:6379
+
+logging:
+  level:
+    root: WARN
+    com.example.claim: INFO
