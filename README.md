@@ -7,6 +7,50 @@ single-packet)과 **수정 방식**(none → JVM local → naive distributed →
 같은 취약점에 적용해 비교하는 실험 랩. 특정 서비스에 종속되지 않도록 식별자/경로/필드를
 일반화했다(발급권=voucher, 회원=memberId 등). **로컬 재현 전용.**
 
+## 선행 연구와 이 프로젝트의 위치
+_(Related work & positioning)_
+
+이 프로젝트는 HTTP race condition이나 single-packet attack **자체를 새로 제안하지 않는다.**
+기법은 모두 선행 연구의 것이고, 이 랩은 그것들을 *실제 서비스와 유사한 토폴로지*에 얹어
+**재현 → 영향 검증 → 수정 검증**을 하나의 reproducible lab으로 엮는 데 초점이 있다.
+
+주요 선행 연구(자세한 서지는 아래 [References](#references)):
+- **James Kettle, _Smashing the State Machine_ (2023)** — last-byte synchronization,
+  HTTP/2 single-packet attack, web race-condition 테스트 방법론.
+- **James Kettle, _Listen to the Whispers_ (2024)** — 웹 타이밍 공격; h2 서버가 `END_STREAM`
+  전에 처리 시작하는 경우 등(본 랩의 single-packet caveat 근거).
+- **Amin Nasiri, H2SpaceX / H3SpaceX** — HTTP/2·3 Single Packet(Last Frame Sync) 도구.
+- **Loi et al., _Race Against Time_ (Computers & Security, 2026)** — 도구/기법/HTTP 1.1·2·3·
+  DBMS·언어까지 race exploitability에 영향을 주는 요인들을 폭넓게 비교.
+- **Nasiri, Chatzoglou, Kambourakis, _QUIC-er Races_ (IJIS, 2026)** — HTTP/2 vs HTTP/3(QUIC)
+  에서 TOCTOU/Single Datagram Attack 비교.
+
+### 이 랩이 추가하는 것
+새 공격 primitive가 아니라 **동일 취약점·동일 테스트 환경에서의 비교와 수정 검증**이 핵심:
+
+1. baseline → HTTP/1.1 last-byte → HTTP/2 single-packet (기법 축)
+2. 단일 WAS → 다중 WAS + 공유 DB (배포 토폴로지 축)
+3. 무락 → JVM-local → 비원자 분산락 → 원자 분산락 (수정 방식 축)
+4. 클라이언트 응답뿐 아니라 **중복 voucherSeq / 서버측 grant_log**로 영향 검증
+5. **pcap wire-level** 동기화 검증(`evidence/`)
+6. **race-window별 재현율 benchmark**(`bench.py`)
+
+| | 선행 연구 | 이 랩 |
+|---|---|---|
+| single-packet / last-byte | ✅ 원출처 | 구현·재현 |
+| race exploitability 요인 벤치 | ✅ (Race Against Time) | 간소 재현(window별 재현율) |
+| HTTP/3 (QUIC / SDA) | ✅ (QUIC-er Races 등) | ❌ (미포함) |
+| 실제 application-state TOCTOU | ✅ | ✅ |
+| 다중 WAS + 공유 DB | 일부 | **핵심 실험축** |
+| JVM-local 락 실패 | 일반적으로 알려짐 | **공격으로 재현** |
+| 비원자 분산락 실패 | 덜 강조 | **핵심 실험축(A/B)** |
+| 원자 분산락로 차단 | 방어 권고 | **동일 랩 A/B 검증** |
+| client → DB 증거 연결 | 연구별 상이 | **명시적 설계** |
+| 공격 + mitigation regression | 부분적 | **프로젝트 핵심** |
+
+즉 이 저장소의 초점은 새 기법 발명이 아니라 **reproducible security engineering & mitigation
+validation**이다.
+
 ## 구성
 | 파일 | 설명 |
 |---|---|
@@ -200,12 +244,29 @@ python3 bench.py --reps 30 --concurrent 20 --windows 50,10,5,1,0
 (위 `multi/local` 결과), 비원자 `EXISTS→SET` 락도 불충분하다(`realstack` 의
 `distributed-naive` 결과).
 
-## 분류 / 참고
-- **CWE-362**: Concurrent Execution using Shared Resource with Improper Synchronization (Race Condition)
-- **CWE-367**: Time-of-check Time-of-use (TOCTOU) Race Condition
-- 전송/동기화 기법 출처: **waf-ips-ids-retest** 의 TC-24 — https://github.com/windshock/waf-ips-ids-retest/
-- 레이스 기법 이론: PortSwigger Research — "Smashing the state machine", "Listen to the whispers"
-- James Kettle, single-packet attack / last-byte synchronization
+## 분류 (Classification)
+- **CWE-362** — Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')
+- **CWE-367** — Time-of-check Time-of-use (TOCTOU) Race Condition
+
+<a id="references"></a>
+## References
+1. James Kettle, *Smashing the State Machine: The True Potential of Web Race Conditions*,
+   PortSwigger Research (Black Hat USA / DEF CON 31), 2023.
+   https://portswigger.net/research/smashing-the-state-machine
+2. James Kettle, *Listen to the Whispers: Web Timing Attacks That Actually Work*,
+   PortSwigger Research (Black Hat USA / DEF CON 32), 2024.
+   https://portswigger.net/research/listen-to-the-whispers-web-timing-attacks-that-actually-work
+3. Mohammad Amin Nasiri, *H2SpaceX — HTTP/2 Single Packet Attack (Last Frame Synchronization) library*.
+   https://github.com/nxenon/h2spacex  (HTTP/3: https://github.com/nxenon/h3spacex)
+4. Federico Loi, Lorenzo Pisu, Leonardo Regano, Davide Maiorca, Giorgio Giacinto,
+   *Race Against Time: Investigating the Factors that Influence Web Race Condition Exploits*,
+   Computers & Security 160 (2026) 104740. DOI: 10.1016/j.cose.2025.104740
+5. Mohammad Amin Nasiri, Efstratios Chatzoglou, Georgios Kambourakis,
+   *QUIC-er Races: HTTP/3 Won't Save You from TOCTOU Vulnerabilities*,
+   International Journal of Information Security 25, 83 (2026). DOI: 10.1007/s10207-026-01258-6
+6. 전송/동기화 기법 차용 출처: *waf-ips-ids-retest* 의 TC-24 — https://github.com/windshock/waf-ips-ids-retest/
+
+> 서지는 원문 대조로 검증함(제목/저자/DOI/연도). 인용 오류 발견 시 이슈로 알려주세요.
 
 ## License
 MIT (`LICENSE`). 로컬 재현·연구용. 승인된 환경 밖의 실서비스에 사용하지 말 것.
