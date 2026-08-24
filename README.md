@@ -1,8 +1,11 @@
-# 1회성 보상 발급 API 레이스 컨디션 재현 랩
+# 레이스 컨디션 재현 · 동기화 기법 벤치마크 랩
+_(Race-condition reproduction & synchronization benchmark lab)_
 
 `claimReward()`(1회성 발급권을 소모해 보상을 지급하는 엔드포인트)의 **TOCTOU 레이스
-컨디션**을 검증하는 도구 + 로컬 재현용 예제 API. 특정 서비스에 종속되지 않도록
-식별자/경로/필드를 일반화했다(발급권=voucher, 회원=memberId 등).
+컨디션**(CWE-367 / CWE-362)을 재현하고, **동기화 기법**(baseline → last-byte →
+single-packet)과 **수정 방식**(none → JVM local → naive distributed → 원자 distributed)을
+같은 취약점에 적용해 비교하는 실험 랩. 특정 서비스에 종속되지 않도록 식별자/경로/필드를
+일반화했다(발급권=voucher, 회원=memberId 등). **로컬 재현 전용.**
 
 ## 구성
 | 파일 | 설명 |
@@ -10,10 +13,15 @@
 | `race_test_claim.py` | **라스트 바이트 동기화판**(HTTP/1.1) — raw socket 바이트 제어(tc24 방식 차용), stdlib only |
 | `race_test_single_packet.py` | **HTTP/2 단일 패킷 공격판** — stdlib 로 h2 프레임/HPACK 직접 구현 |
 | `race_test_claim_baseline.py` | **기준판**(`requests` + `threading.Barrier`) — 동기화 안 한 원래 방식, 비교용 |
+| `bench.py` | **레이스 윈도우 벤치마크** — 50→0ms × 3기법 반복 측정, JSON/CSV/MD 출력 |
 | `example_api/claim_server.py` | 단일 서버 최소 재현(취약/수정본/admin) |
 | `example_api/claim_topology.py` | 실측 web/was 구조 2종 재현 — `--profile multi\|single` |
 | `example_api/h2_front.py` | **로컬 HTTP/2 프론트** — 단일 패킷 공격 엔드투엔드 재현용 최소 h2 서버 |
 | `realstack/` | **실제 스택 구현(Docker)** — nginx + Tomcat(Spring Boot)×2 + 공유 Postgres + Redis. `realstack/README.md` |
+| `evidence/` | wire 캡처 증거(pcap) + 재현 스크립트 (`evidence/pcap/analysis.md`) |
+| `bench_results/` | 벤치마크 산출물(results.json/csv/md) |
+
+세 테스터는 모두 `--json` 요약 출력을 지원한다(벤치마크·CI 용).
 
 > Python `example_api/*` 는 기법·레이스를 빠르게 증명하는 스텁이고, `realstack/` 은
 > 운영과 동일한 nginx/Tomcat/Java/DB/Redis 스택으로 같은 결론을 재현한다(둘 다 같은
@@ -142,19 +150,62 @@ python3 race_test_single_packet.py --selftest    # 프레이밍/HPACK 자체검�
 
 실제 h2 프론트 대상으로도 동일하게 쓴다(`--url https://<h2-front-host>/... --insecure`는 사설/랩 인증서 전용).
 
-## tc24 적용 vs 기준판 비교 (좁은 윈도우에서 재현 안정성)
+**wire 증거(단일 패킷):** `evidence/pcap/` 에 캡처와 분석이 있다. 20개 `END_STREAM`
+DATA 프레임(평문 180B)이 **단일 202B TCP 세그먼트**로 나간 것을 확인했다
+(180B + TLS 오버헤드). 재현: `evidence/capture_singlepacket.sh`, 분석:
+`evidence/pcap/analysis.md`.
+
+**적용 범위 주의 (일반화 금지):**
+- 이 구현은 `HEADERS × N` → (settle) → `DATA(END_STREAM) × N`(단일 버스트) 구조다.
+  **이 스택(nginx→Tomcat)에서 동작함은 검증**했지만, 모든 HTTP/2 서버에 일반화하지 말 것.
+- 일부 h2 서버는 `END_STREAM` 을 기다리지 않고 **HEADERS 수신 시점에 처리 시작**할 수 있다.
+  그런 서버에는 HEADERS 프레임까지 동기화하는 **dual-packet** 방식이 필요하다
+  (PortSwigger, "Listen to the whispers"). → 즉 여기 구현은
+  *general-purpose single-packet 라이브러리*가 아니라 *tested-on-this-stack PoC* 다.
+- Nagle/타이밍: 최종 버스트를 **한 번의 `sendall`** 로 보내 loopback/일반 MTU 에선 한
+  세그먼트가 된다. 원격/실환경에서는 `TCP_NODELAY`·PING warm-up·pcap 재확인 권장
+  (PortSwigger, "Smashing the state machine").
+
+## 레이스 윈도우 벤치마크 — `bench.py`
+세 기법이 **얼마나 좁은 레이스 윈도우까지 잡아내는지**를 반복 측정한다. 윈도우는 요청
+헤더 `X-Race-Window-Ms` 로 런타임 주입(서버 재시작 없음), `--json` 요약을 집계한다.
 ```bash
-python3 example_api/claim_server.py --port 8081 --race-window 0.001 &
-python3 race_test_claim_baseline.py --url http://127.0.0.1:8081/reward/claim -n 20   # 기준판
-python3 race_test_claim.py          --url http://127.0.0.1:8081/reward/claim -n 20   # 라스트바이트 동기화
+python3 bench.py --reps 30 --concurrent 20 --windows 50,10,5,1,0
+# → bench_results/results.{json,csv,md}
 ```
-둘 다 레이스는 재현되지만(≥2건), 라스트 바이트 동기화판이 좁은 윈도우에서 훨씬
-안정적으로 동시성을 맞춘다(실측: 기준판 6~13/20 편차, 동기화판 20/20). 실제 네트워크
-(지터가 큰 환경)일수록 격차가 더 벌어진다.
+
+실측(재현율 % = 성공 ≥2 인 실행 비율, 발급권 1개, 동시 20, 20회 반복):
+
+| Race window | baseline | last-byte | single-packet |
+|---:|---:|---:|---:|
+| 50 ms | 100% (평균 20) | 100% (평균 20) | 100% (평균 20) |
+| 10 ms | 100% (평균 20) | 100% (평균 20) | 100% (평균 20) |
+| 5 ms  | 100% (평균 20) | 100% (평균 20) | 100% (평균 20) |
+| 1 ms  | 95% (평균 11)  | 100% (평균 18.6) | 100% (평균 20) |
+| 0 ms (인위적 sleep 없음) | 0% (평균 1) | 10% (평균 1.1) | 5% (평균 1.05) |
+
+- 윈도우가 좁아질수록 **baseline 이 먼저 무너지고**(1ms: 95%·평균 11), last-byte·single-packet
+  은 1ms 까지 100% 재현. 동기화 기법의 값어치가 마진에서 드러난다.
+- **0ms 행 주의:** 순수 파이썬 랩은 GIL·인터프리터 오버헤드가 지배해 자연 윈도우가
+  마이크로초 수준이라 세 기법 모두 미미하고 노이즈가 크다(이 실행에선 last-byte 가 우연히
+  single-packet 을 앞섬). 진짜 sub-ms 변별은 (1) `realstack`(Java/Tomcat, 실제 병렬성)
+  대상 벤치, (2) wire 스프레드 pcap 측정으로 봐야 한다. 공식 수치는 last-byte median 4ms,
+  single-packet 1ms (PortSwigger). 여기 랩은 *기법 서열*을 보이는 용도다.
 
 ## 권장 수정
-`claimReward()`의 검사~소모 구간을 발급권 적립 경로와 동일하게
-`distributedLockExecutor(key=memberId)` 로 감싸거나, `markVoucherUsed` 를 조건부
-UPDATE(`WHERE used=0`)로 만들어 영향 행 수(1)로 소유권을 확정한 뒤 보상을 지급한다.
-(다중 인스턴스 배포에서는 JVM-local 락으로 불충분 — 위 `multi/local` 결과가 근거.)
-```
+`claimReward()`의 검사~소모 구간을 발급권 적립 경로와 동일하게 **원자적 분산 락**
+(key=memberId, 예: Redisson RLock 또는 `SET NX PX` + Lua 해제)으로 감싸거나,
+`markVoucherUsed` 를 조건부 UPDATE(`WHERE used=false`)로 만들어 영향 행 수(1)로 소유권을
+확정한 뒤 보상을 지급한다(CAS). 다중 인스턴스 배포에서는 JVM-local 락으로 불충분하고
+(위 `multi/local` 결과), 비원자 `EXISTS→SET` 락도 불충분하다(`realstack` 의
+`distributed-naive` 결과).
+
+## 분류 / 참고
+- **CWE-362**: Concurrent Execution using Shared Resource with Improper Synchronization (Race Condition)
+- **CWE-367**: Time-of-check Time-of-use (TOCTOU) Race Condition
+- 전송/동기화 기법 출처: **waf-ips-ids-retest** 의 TC-24 — https://github.com/windshock/waf-ips-ids-retest/
+- 레이스 기법 이론: PortSwigger Research — "Smashing the state machine", "Listen to the whispers"
+- James Kettle, single-packet attack / last-byte synchronization
+
+## License
+MIT (`LICENSE`). 로컬 재현·연구용. 승인된 환경 밖의 실서비스에 사용하지 말 것.

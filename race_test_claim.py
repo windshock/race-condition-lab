@@ -218,8 +218,8 @@ def worker(
         sock.sendall(head)
         # 3) 서버가 확실히 '마지막 바이트 대기' 상태로 park 되도록 잠깐 정착
         time.sleep(settle)
-        # 4) 전 스레드 정렬
-        barrier.wait()
+        # 4) 전 스레드 정렬 (timeout: 일부 연결이 실패해 배리어에 못 오면 여기서 무한대기 방지)
+        barrier.wait(timeout=max(5.0, timeout))
         # 5) 남긴 마지막 바이트 일제 flush → 요청들이 동시에 '완성'
         t0 = time.perf_counter()
         sock.sendall(last_byte)
@@ -228,7 +228,11 @@ def worker(
         result.status_code = code
         result.body = safe_json(body)
         result.served_by = headers.get("x-served-by")  # 토폴로지 랩: was1/was2
+    except threading.BrokenBarrierError:
+        result.error = "BrokenBarrier: 다른 연결 실패/타임아웃으로 동기화 중단"
     except Exception as e:  # noqa: BLE001
+        # 이 worker 가 배리어 도달 전에 실패했을 수 있으므로, 대기 중인 나머지 worker 를 깨운다
+        barrier.abort()
         result.error = f"{type(e).__name__}: {e}"
     finally:
         try:
@@ -244,13 +248,9 @@ def is_success(body) -> bool:
 
 
 def run(url: str, concurrent: int, settle: float, timeout: float, insecure: bool,
-        extra_headers: dict | None = None) -> int:
+        extra_headers: dict | None = None, json_out: bool = False) -> int:
     scheme, host, port, path = parse_url(url)
     request_bytes = build_request_bytes(host, port, path, HEADERS, extra_headers)
-
-    print(f"=== 대상: {url}  (동시 {concurrent}건, 라스트바이트 동기화) ===")
-    if scheme == "https" and insecure:
-        print("    (--insecure: 사설/랩 인증서 검증 생략)")
 
     barrier = threading.Barrier(concurrent)
     results = [Fired(i) for i in range(concurrent)]
@@ -266,15 +266,17 @@ def run(url: str, concurrent: int, settle: float, timeout: float, insecure: bool
     for t in threads:
         t.join()
 
-    print(f"\n=== 총 {concurrent}건 요청 결과 ===")
     success_count = 0
+    error_count = 0
     seqs = []
     seq_instances: dict = {}   # seq -> set(served_by)  (토폴로지 랩)
     inst_hits: dict = {}
     saw_instance = False
+    lines = []
     for r in results:
         if r.error:
-            print(f"[{r.idx:02d}] ERROR: {r.error}")
+            error_count += 1
+            lines.append(f"[{r.idx:02d}] ERROR: {r.error}")
             continue
         ok = is_success(r.body)
         success_count += ok
@@ -286,28 +288,48 @@ def run(url: str, concurrent: int, settle: float, timeout: float, insecure: bool
             seqs.append(seq)
             seq_instances.setdefault(seq, set()).add(inst)
             inst_hits[inst] = inst_hits.get(inst, 0) + 1
-        print(f"[{r.idx:02d}] status={r.status_code} elapsed={r.elapsed}s served_by={inst} "
-              f"{'SUCCESS' if ok else 'blocked'} body={r.body}")
+        lines.append(f"[{r.idx:02d}] status={r.status_code} elapsed={r.elapsed}s served_by={inst} "
+                     f"{'SUCCESS' if ok else 'blocked'} body={r.body}")
 
-    print(f"\n성공(보상 지급) 응답 수: {success_count} / {concurrent}")
+    dup_seqs = {s for s in seqs if seqs.count(s) > 1}
+    race = success_count >= 2
+
+    if json_out:
+        print(json.dumps({
+            "technique": "last-byte", "url": url, "concurrent": concurrent,
+            "success": success_count, "errors": error_count,
+            "race": race, "dup_voucher": bool(dup_seqs),
+            "by_instance": inst_hits,
+        }, ensure_ascii=False))
+        return 2 if race else 0
+
+    print(f"=== 대상: {url}  (동시 {concurrent}건, 라스트바이트 동기화) ===")
+    if scheme == "https" and insecure:
+        print("    (--insecure: 사설/랩 인증서 검증 생략)")
+    print(f"\n=== 총 {concurrent}건 요청 결과 ===")
+    for ln in lines:
+        print(ln)
+    print(f"\n성공(보상 지급) 응답 수: {success_count} / {concurrent}"
+          + (f"  (오류 {error_count}건)" if error_count else ""))
     if saw_instance and inst_hits:
         print(f"   인스턴스별 성공 분포: {inst_hits}")
-    if success_count >= 2:
+    if race:
         print("=> 발급권 1개로 2건 이상 보상 지급됨: 레이스 컨디션 재현")
-        dup_seqs = {s for s in seqs if seqs.count(s) > 1}
         if dup_seqs:
             print(f"=> 결정적 증거: 동일 voucherSeq({dup_seqs})가 여러 성공 응답에 중복 등장 "
                   f"-> 같은 발급권 row 가 중복 소모됨")
-            # 토폴로지 랩: 같은 seq 가 서로 다른 인스턴스(was1/was2)에서 소모됐는지
             cross = {s: insts for s, insts in seq_instances.items() if len(insts) > 1}
             if cross:
-                print(f"=> 교차-인스턴스 증거: {cross} — 같은 발급권가 was1/was2 양쪽에서 소모됨 "
+                print(f"=> 교차-인스턴스 증거: {cross} — 같은 발급권이 was1/was2 양쪽에서 소모됨 "
                       f"⇒ JVM-local 락으론 못 막음, 분산락(distributed) 필요")
         else:
-            print(f"   (성공 응답들의 voucherSeq: {seqs} — 서로 다르면 opportunity 가 "
+            print(f"   (성공 응답들의 voucherSeq: {seqs} — 서로 다르면 발급권이 "
                   f"실제로 1개였는지 DB 재확인 필요)")
         return 2
-    print("=> 1건만 성공: 이번 실행에선 레이스 미재현 (반복 실행 권장)")
+    if success_count == 1:
+        print("=> 1건만 성공: 이번 실행에선 레이스 미재현 (정상). 반복 실행 권장")
+    else:
+        print(f"=> 0건 성공: 전부 실패/차단 (오류 {error_count}건). 대상/발급권/네트워크 확인")
     return 0
 
 
@@ -322,13 +344,14 @@ def main() -> int:
                     help="https 대상의 인증서/호스트명 검증 해제 (사설/랩 인증서 전용)")
     ap.add_argument("-H", "--header", action="append", default=[],
                     help="추가 요청 헤더 'Key: Value' (반복 가능). 예: -H 'X-Lock-Mode: distributed'")
+    ap.add_argument("--json", action="store_true", help="요약 1줄 JSON 만 출력(벤치마크용)")
     args = ap.parse_args()
     extra = {}
     for h in args.header:
         if ":" in h:
             k, v = h.split(":", 1)
             extra[k.strip()] = v.strip()
-    return run(args.url, args.concurrent, args.settle, args.timeout, args.insecure, extra)
+    return run(args.url, args.concurrent, args.settle, args.timeout, args.insecure, extra, args.json)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,152 @@
+[
+  {
+    "window_ms": 50,
+    "technique": "baseline",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 50,
+    "technique": "last-byte",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 50,
+    "technique": "single-packet",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 10,
+    "technique": "baseline",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 10,
+    "technique": "last-byte",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 10,
+    "technique": "single-packet",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 5,
+    "technique": "baseline",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 5,
+    "technique": "last-byte",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 5,
+    "technique": "single-packet",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 1,
+    "technique": "baseline",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 95.0,
+    "mean_success": 11,
+    "median_success": 13.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 1,
+    "technique": "last-byte",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 18.6,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 1,
+    "technique": "single-packet",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 100.0,
+    "mean_success": 20,
+    "median_success": 20.0,
+    "max_success": 20
+  },
+  {
+    "window_ms": 0,
+    "technique": "baseline",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 0.0,
+    "mean_success": 1,
+    "median_success": 1.0,
+    "max_success": 1
+  },
+  {
+    "window_ms": 0,
+    "technique": "last-byte",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 10.0,
+    "mean_success": 1.1,
+    "median_success": 1.0,
+    "max_success": 2
+  },
+  {
+    "window_ms": 0,
+    "technique": "single-packet",
+    "reps": 20,
+    "concurrent": 20,
+    "race_rate_pct": 5.0,
+    "mean_success": 1.05,
+    "median_success": 1.0,
+    "max_success": 2
+  }
+]

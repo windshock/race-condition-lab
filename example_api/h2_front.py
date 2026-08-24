@@ -207,7 +207,13 @@ def serve_connection(tls, race_window, default_mode):
 
     def dispatch(sid, hdrs):
         mode = hdrs.get("x-lock-mode", default_mode)
-        payload = claim_reward(race_window, get_lock(mode, TEST_MEMBER_ID))
+        rw = race_window
+        if "x-race-window-ms" in hdrs:      # 벤치마크용 런타임 오버라이드
+            try:
+                rw = max(0.0, float(hdrs["x-race-window-ms"]) / 1000.0)
+            except ValueError:
+                pass
+        payload = claim_reward(rw, get_lock(mode, TEST_MEMBER_ID))
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         hblock = (hpack_header(b":status", b"200")
                   + hpack_header(b"content-type", b"application/json; charset=utf-8"))

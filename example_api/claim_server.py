@@ -181,7 +181,14 @@ class Handler(BaseHTTPRequestHandler):
         if length:
             self.rfile.read(length)
 
+        # 레이스 윈도우: 기본은 서버 기동값, 요청 헤더로 오버라이드(벤치마크용)
         rw = self.server.race_window  # type: ignore[attr-defined]
+        hdr_rw = self.headers.get("X-Race-Window-Ms")
+        if hdr_rw is not None:
+            try:
+                rw = max(0.0, float(hdr_rw) / 1000.0)
+            except ValueError:
+                pass
 
         if path == "/reward/claim":
             code, payload = _do_claim(rw, use_lock=False)

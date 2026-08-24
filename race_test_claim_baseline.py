@@ -24,6 +24,7 @@ tc24 방식(race_test_claim.py)은 연결과 헤더를 미리 다 보내두고
 from __future__ import annotations
 
 import argparse
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,19 +53,23 @@ def is_success(body) -> bool:
     return bool(body.get("rewardType"))
 
 
-def fire_request(url, barrier, session, idx, timeout, verify):
-    barrier.wait()  # release 이후에야 아래 전송이 '전부' 일어난다 (tc24 와의 차이점)
+def fire_request(url, barrier, session, idx, timeout, verify, extra):
+    try:
+        barrier.wait(timeout=max(5.0, timeout))  # 일부 스레드 실패 시 무한대기 방지
+    except threading.BrokenBarrierError:
+        return {"idx": idx, "error": "BrokenBarrier: 동기화 중단"}
     t0 = time.perf_counter()
     try:
-        resp = session.post(url, headers=HEADERS, timeout=timeout, verify=verify)
+        resp = session.post(url, headers={**HEADERS, **extra}, timeout=timeout, verify=verify)
         return {"idx": idx, "status_code": resp.status_code,
                 "elapsed": round(time.perf_counter() - t0, 4), "body": safe_json(resp)}
     except Exception as e:  # noqa: BLE001
+        barrier.abort()  # 나머지 스레드가 배리어에서 영원히 대기하지 않도록
         return {"idx": idx, "error": f"{type(e).__name__}: {e}"}
 
 
-def run(url, concurrent, timeout, verify):
-    print(f"=== [비-tc24] 대상: {url}  (동시 {concurrent}건, requests+Barrier) ===")
+def run(url, concurrent, timeout, verify, extra=None, json_out=False):
+    extra = extra or {}
     barrier = threading.Barrier(concurrent)
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(pool_connections=concurrent, pool_maxsize=concurrent)
@@ -73,34 +78,54 @@ def run(url, concurrent, timeout, verify):
 
     results = []
     with ThreadPoolExecutor(max_workers=concurrent) as pool:
-        futures = [pool.submit(fire_request, url, barrier, session, i, timeout, verify)
+        futures = [pool.submit(fire_request, url, barrier, session, i, timeout, verify, extra)
                    for i in range(concurrent)]
         for f in as_completed(futures):
             results.append(f.result())
     results.sort(key=lambda r: r["idx"])
 
-    print(f"\n=== 총 {concurrent}건 요청 결과 ===")
     success_count = 0
+    error_count = 0
     seqs = []
+    lines = []
     for r in results:
         if "error" in r:
-            print(f"[{r['idx']:02d}] ERROR: {r['error']}")
+            error_count += 1
+            lines.append(f"[{r['idx']:02d}] ERROR: {r['error']}")
             continue
         ok = is_success(r["body"])
         success_count += ok
         if ok and isinstance(r["body"], dict):
             seqs.append(r["body"].get("voucherSeq"))
-        print(f"[{r['idx']:02d}] status={r['status_code']} elapsed={r['elapsed']}s "
-              f"{'SUCCESS' if ok else 'blocked'} body={r['body']}")
+        lines.append(f"[{r['idx']:02d}] status={r['status_code']} elapsed={r['elapsed']}s "
+                     f"{'SUCCESS' if ok else 'blocked'} body={r['body']}")
 
-    print(f"\n성공(보상 지급) 응답 수: {success_count} / {concurrent}")
-    if success_count >= 2:
+    dup_seqs = {s for s in seqs if seqs.count(s) > 1}
+    race = success_count >= 2
+
+    if json_out:
+        print(json.dumps({
+            "technique": "baseline", "url": url, "concurrent": concurrent,
+            "success": success_count, "errors": error_count,
+            "race": race, "dup_voucher": bool(dup_seqs),
+        }, ensure_ascii=False))
+        return 2 if race else 0
+
+    print(f"=== [비-tc24] 대상: {url}  (동시 {concurrent}건, requests+Barrier) ===")
+    print(f"\n=== 총 {concurrent}건 요청 결과 ===")
+    for ln in lines:
+        print(ln)
+    print(f"\n성공(보상 지급) 응답 수: {success_count} / {concurrent}"
+          + (f"  (오류 {error_count}건)" if error_count else ""))
+    if race:
         print("=> 발급권 1개로 2건 이상 보상 지급됨: 레이스 컨디션 재현")
-        dup_seqs = {s for s in seqs if seqs.count(s) > 1}
         if dup_seqs:
             print(f"=> 결정적 증거: 동일 voucherSeq({dup_seqs})가 중복 등장")
         return 2
-    print("=> 1건만 성공: 이번 실행에선 레이스 미재현 (반복 실행 권장)")
+    if success_count == 1:
+        print("=> 1건만 성공: 이번 실행에선 레이스 미재현 (정상). 반복 실행 권장")
+    else:
+        print(f"=> 0건 성공: 전부 실패/차단 (오류 {error_count}건). 대상/발급권/네트워크 확인")
     return 0
 
 
@@ -110,8 +135,15 @@ def main() -> int:
     ap.add_argument("-n", "--concurrent", type=int, default=20, help="동시 요청 수 (기본 20)")
     ap.add_argument("--timeout", type=float, default=10.0, help="요청 타임아웃(초)")
     ap.add_argument("--insecure", action="store_true", help="https 인증서 검증 해제 (사설/랩 전용)")
+    ap.add_argument("-H", "--header", action="append", default=[], help="추가 헤더 'Key: Value'")
+    ap.add_argument("--json", action="store_true", help="요약 1줄 JSON 만 출력(벤치마크용)")
     args = ap.parse_args()
-    return run(args.url, args.concurrent, args.timeout, verify=not args.insecure)
+    extra = {}
+    for h in args.header:
+        if ":" in h:
+            k, v = h.split(":", 1)
+            extra[k.strip()] = v.strip()
+    return run(args.url, args.concurrent, args.timeout, not args.insecure, extra, args.json)
 
 
 if __name__ == "__main__":
