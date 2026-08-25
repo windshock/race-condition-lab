@@ -7,6 +7,13 @@ single-packet)과 **수정 방식**(none → JVM local → naive distributed →
 같은 취약점에 적용해 비교하는 실험 랩. 특정 서비스에 종속되지 않도록 식별자/경로/필드를
 일반화했다(발급권=voucher, 회원=memberId 등). **로컬 재현 전용.**
 
+> 📝 **블로그 글 / Blog post** — 실측 결과와 대응 가이드를 다이어그램과 함께 정리했습니다:
+> - 🇰🇷 한글: https://windshock.github.io/ko/post/2026-08-25-race-condition-toctou-mitigation/
+> - 🇬🇧 English: https://windshock.github.io/en/post/2026-08-25-race-condition-toctou-mitigation/
+>
+> 저장소 내 상세 가이드: [docs/race-condition-mitigation-guide.md](docs/race-condition-mitigation-guide.md)
+> · [English](docs/race-condition-mitigation-guide.en.md)
+
 ## 선행 연구와 이 프로젝트의 위치
 _(Related work & positioning)_
 
