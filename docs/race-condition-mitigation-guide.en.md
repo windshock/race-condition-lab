@@ -490,3 +490,23 @@ cd realstack
 - Vulnerable code / mitigation implementations: [`realstack/app/src/main/java/com/example/claim/ClaimTxService.java`](../realstack/app/src/main/java/com/example/claim/ClaimTxService.java)
 - Mode routing / out-of-transaction exception conversion: [`realstack/app/src/main/java/com/example/claim/ClaimService.java`](../realstack/app/src/main/java/com/example/claim/ClaimService.java)
 - Measured evidence is regenerated from the live server by `./run_all.sh` (the "Measured summary" table above is that output; the script exits 1 if a mitigation leaks).
+
+---
+
+## Appendix: `chunked` is a framework default, not just an attacker's trick (Spring 6.1)
+
+`chunked` / last-byte / single-packet are tools this lab uses to *reproduce* the race, but `chunked` itself
+is normal traffic that modern frameworks emit **by default**. Spring Framework 6.1 changed most
+`ClientHttpRequestFactory` implementations behind `RestClient`/`RestTemplate` to **stop buffering the whole
+request body, to reduce memory usage** ([issue #30557](https://github.com/spring-projects/spring-framework/issues/30557)),
+so content whose size isn't known up front (like JSON) is sent without `Content-Length`, as `chunked`
+([6.1 release notes](https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-6.1-Release-Notes)).
+It didn't "give up computing the length" — it gave up *materializing the whole body in memory just to learn
+its length* (a streaming-first design); the lost `Content-Length` and the `chunked` framing are side effects.
+
+- `chunked` appears as normal traffic without any developer intending it, so a control that blocks it or
+  assumes `Content-Length` (nginx/WAF/IDS) will misfire — **blocking `chunked` is not the real fix.**
+- This is Spring's **client (outbound)** behavior and is *not* the attacker's deliberate last-byte /
+  single-packet synchronization. What they share is that **a low-level implementation choice nobody
+  consciously made produces wire-level behavior** — the same shape as the TOCTOU window this document is
+  about.

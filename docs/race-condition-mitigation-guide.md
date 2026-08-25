@@ -455,3 +455,21 @@ cd realstack
 - 취약 코드 / 완화 구현: [`realstack/app/src/main/java/com/example/claim/ClaimTxService.java`](../realstack/app/src/main/java/com/example/claim/ClaimTxService.java)
 - 모드 라우팅 / 트랜잭션 밖 예외 변환: [`realstack/app/src/main/java/com/example/claim/ClaimService.java`](../realstack/app/src/main/java/com/example/claim/ClaimService.java)
 - 실측 증거: `./run_all.sh` 실행 시 서버 실측으로 재생성된다(위 "실측 요약" 표가 그 결과이며, 완화 모드 누수 시 스크립트가 `exit 1`).
+
+---
+
+## 부록: `chunked`는 공격 기법이 아니라 프레임워크 기본값이다 (Spring 6.1)
+
+`chunked`/last-byte/single-packet은 이 랩에서 레이스 재현을 돕는 도구지만, `chunked` 자체는 최신
+프레임워크가 **기본값으로** 만들어내는 정상 트래픽이다. Spring Framework 6.1은 **메모리 사용을 줄이려**
+`RestClient`/`RestTemplate` 대부분의 `ClientHttpRequestFactory`가 요청 본문을 통째로 버퍼링하지 않도록
+바꿨고([이슈 #30557](https://github.com/spring-projects/spring-framework/issues/30557)), 그 결과 크기를
+미리 알 수 없는 JSON 등은 `Content-Length` 없이 `chunked`로 나간다([6.1 릴리스 노트](https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-6.1-Release-Notes)).
+즉 "길이 계산을 포기"한 게 아니라 "길이를 알려고 body 전체를 먼저 메모리에 만들어 두는 과정을 포기"한
+streaming-first 설계이며, `Content-Length` 소실과 `chunked`는 그 설계의 부작용이다.
+
+- `chunked`는 개발자가 의식하지 않아도 자연 발생하는 정상 트래픽이다. 이를 차단하거나 `Content-Length`를
+  전제하는 통제(nginx/WAF/IDS)는 오작동한다 — **`chunked` 차단은 근본 대응이 아니다.**
+- 다만 이건 Spring의 **클라이언트(아웃바운드)** 동작으로, 공격자의 의도적 last-byte/single-packet
+  동기화와는 다르다. 공통점은 "개발자가 의식하지 않은 저수준 구현 선택이 와이어 레벨 동작을 만든다"는
+  점이며, 이는 이 문서의 주제(의식하지 않는 사이 생기는 TOCTOU 윈도우)와 같은 구조다.

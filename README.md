@@ -297,6 +297,12 @@ python3 bench.py --reps 30 --concurrent 20 --windows 50,10,5,1,0
    International Journal of Information Security 25, 83 (2026). DOI: 10.1007/s10207-026-01258-6
 6. 전송/동기화 기법 차용 출처: *waf-ips-ids-retest* 의 TC-24 — https://github.com/windshock/waf-ips-ids-retest/
 
+배경 — `chunked`가 프레임워크 기본값이 된 이유(메모리 절약을 위한 streaming-first, `Content-Length` 소실은 부작용):
+7. Spring Framework 6.1 Release Notes — RestClient/RestTemplate 요청 본문 버퍼링 축소, 일부 콘텐츠 `Content-Length` 미설정.
+   https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-6.1-Release-Notes
+8. Spring Framework Issue #30557 — *Remove buffering in ClientHttpRequestFactory implementations*.
+   https://github.com/spring-projects/spring-framework/issues/30557
+
 > 서지는 원문 대조로 검증함(제목/저자/DOI/연도). 인용 오류 발견 시 이슈로 알려주세요.
 
 ## License
